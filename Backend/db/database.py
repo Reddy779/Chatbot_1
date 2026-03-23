@@ -1,36 +1,35 @@
-from sqlalchemy import create_engine, Column, String, Text, DateTime
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
-from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-DATABASE_URL = "sqlite:///./chatbot.db"
+load_dotenv()
 
-engine = create_engine(
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+engine = create_async_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False}
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    echo=False,
+    connect_args={"ssl": "require"}
 )
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+AsyncSessionLocal = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+)
 
 class Base(DeclarativeBase):
     pass
 
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
-
-    id         = Column(String,   primary_key=True)
-    session_id = Column(String,   index=True, nullable=False)
-    role       = Column(String,   nullable=False)
-    content    = Column(Text,     nullable=False)
-    timestamp  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-def init_db():
-    """Creates all tables if they don't exist yet."""
-    Base.metadata.create_all(bind=engine)
-
-def get_db():
-    """FastAPI dependency — opens a DB session per request, always closes it."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()

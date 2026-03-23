@@ -1,53 +1,39 @@
-import uuid
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Request
+from langchain_core.messages import HumanMessage
 
-from db.database import get_db, ChatMessage
 from models.schemas import ChatRequest, ChatResponse
-from services.groq_client import get_response, MODEL
+from services.graph import llm
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat(request: ChatRequest, req: Request):
 
-    # 1. Save the user's message to DB
-    db.add(ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=request.session_id,
-        role="user",
-        content=request.message,
-    ))
-    db.commit()
+    graph = req.app.extra.get("graph") or req.app.state.__dict__.get("graph")
 
-    # 2. Load this session's full history from DB
-    rows = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.session_id == request.session_id)
-        .order_by(ChatMessage.timestamp.asc())
-        .limit(20)           
-        .all()
-    )
-    history = [{"role": r.role, "content": r.content} for r in rows]
+    from main import app_state
+    graph = app_state["graph"]
 
-    # 3. Call Groq and get the reply
+    config = {"configurable": {"thread_id": request.session_id}}
+
+    initial_state = {
+        "messages":   [HumanMessage(content=request.message)],
+        "user_id":    request.user_id,
+        "session_id": request.session_id,
+        "user_facts": [],
+        "summaries":  [],
+    }
+
     try:
-        reply = get_response(history)
+        result = await graph.ainvoke(initial_state, config=config)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Groq API error: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Graph error: {str(e)}")
 
-    # 4. Save the assistant's reply to DB
-    db.add(ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=request.session_id,
-        role="assistant",
-        content=reply,
-    ))
-    db.commit()
+    reply = result["messages"][-1].content
 
-    # 5. Return plain JSON
     return ChatResponse(
         session_id=request.session_id,
+        user_id=request.user_id,
         reply=reply,
-        model=MODEL,
+        model=llm.model_name,
     )

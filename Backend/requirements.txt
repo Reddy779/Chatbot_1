@@ -1,8 +1,28 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-groq==0.8.0
-sqlalchemy==2.0.30
-pydantic==2.7.1
-pydantic-settings==2.2.1
-python-dotenv==1.0.1
-httpx==0.27.0
+# Core API
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# DB (Async PostgreSQL)
+sqlalchemy[asyncio]
+asyncpg
+alembic
+
+# Validation
+pydantic
+pydantic-settings
+
+# LLM (Groq)
+groq
+langchain-core
+langchain-groq
+
+# LangGraph
+langgraph
+langgraph-checkpoint-postgres
+
+# HTTP client
+httpx
+psycopg2-binary
+
+# psycopg2-binary==2.9.9
