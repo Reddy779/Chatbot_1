@@ -18,10 +18,15 @@ class ChatResponse(BaseModel):
 
 class AgentState(BaseModel):
     messages:   Annotated[list[BaseMessage], add_messages]
+
     user_id:    str
     session_id: str
+
     user_facts: list[str] = []
     summaries:  list[str] = []
+    history: list[dict] = []
+
+    message_count: int = 0
 
     class Config:
         arbitrary_types_allowed = True
