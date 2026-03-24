@@ -6,7 +6,7 @@ from sqlalchemy import select, func
 from db.models import Message, Summary, UserFact, User, Session as DBSession
 
 def utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # READ OPERATIONS — used by memory_retrieval_node

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Annotated
+from typing import Annotated, Literal
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 
@@ -18,15 +18,14 @@ class ChatResponse(BaseModel):
 
 class AgentState(BaseModel):
     messages:   Annotated[list[BaseMessage], add_messages]
-
     user_id:    str
     session_id: str
-
     user_facts: list[str] = []
     summaries:  list[str] = []
     history: list[dict] = []
-
     message_count: int = 0
+
+    next_agent: Literal["chat_agent", "research_agent", "tool_agent"] = "chat_agent"
 
     class Config:
         arbitrary_types_allowed = True

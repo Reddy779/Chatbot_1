@@ -5,13 +5,18 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode
 
 from models.schemas import AgentState
 from services.prompts import (
     build_system_prompt,
+    SUPERVISOR_PROMPT,
+    RESEARCH_AGENT_PROMPT,
+    TOOL_AGENT_PROMPT,
     FACT_EXTRACTION_PROMPT,
     SUMMARY_PROMPT,
 )
+from services.tools import RESEARCH_TOOLS, TOOL_AGENT_TOOLS
 from services.memory import (
     get_recent_messages,
     get_recent_summaries,
@@ -35,15 +40,27 @@ llm = ChatGroq(
     streaming=True
 )
 
+llm_supervisor = ChatGroq(
+    api_key=os.getenv("GROQ_API_KEY"),
+    model="llama-3.1-8b-instant",
+    temperature=0.0,
+    max_tokens=15, 
+    streaming=False,
+)
+
 llm_small = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
     model="llama-3.1-8b-instant",
     temperature=0.0,
     max_tokens=512,
+    streaming=False,
 )
 
+llm_research = llm.bind_tools(RESEARCH_TOOLS)
+llm_tool     = llm.bind_tools(TOOL_AGENT_TOOLS)
 
-# NODE 1 — memory_retrieval_node
+
+# NODE 1 [ Memory Retrieval Node]
 async def memory_retrieval_node(state: AgentState) -> dict:
     """
     Fetches all memory layers from Neon before the LLM call.
@@ -76,13 +93,46 @@ async def memory_retrieval_node(state: AgentState) -> dict:
     }
 
 
-# NODE 2 — chat_node
-async def chat_node(state: AgentState) -> dict:
+# NODE 2 [ supervisor_node ]
+async def supervisor_node(state: AgentState) -> dict:
     """
-    Builds rich system prompt and calls the LLM.
-    With streaming=True on llm, this node emits token-level events
-    that astream_events() in the router can intercept and forward.
-    The node itself doesn't change — streaming is handled upstream.
+    Reads the user's latest message and decides which agent handles it.
+    Outputs one of: chat_agent, research_agent, tool_agent.
+
+    Uses llm_supervisor (8B model, temp=0, max_tokens=15) because:
+    - We only need a single word output — small model is faster
+    - temp=0 gives deterministic routing — same input always routes same way
+    - max_tokens=10 is enough for the longest option "research_agent"
+    """
+
+    user_message = state.messages[-1].content
+
+    prompt = SUPERVISOR_PROMPT.format(message=user_message)
+
+    try:
+        response = await llm_supervisor.ainvoke(prompt)
+        decision = response.content.strip().lower()
+
+        # Validate the decision — if unexpected output, default to chat_agent
+        valid_agents = {"chat_agent", "research_agent", "tool_agent"}
+        if decision not in valid_agents:
+            print(f"Supervisor gave unexpected output: '{decision}' — defaulting to chat_agent")
+            decision = "chat_agent"
+
+    except Exception as e:
+        print(f"Supervisor failed: {e} — defaulting to chat_agent")
+        decision = "chat_agent"
+
+    print(f"Supervisor routed to: {decision}")
+    return {"next_agent": decision}
+
+
+# NODE 3 [ Chat Agent Node ]
+async def chat_agent_node(state: AgentState) -> dict:
+    """
+    Default agent — handles general conversation.
+    Most memory-aware of the three agents.
+    Uses full personalized system prompt with facts and summaries.
     """
     system_prompt = build_system_prompt(
         user_facts=state.user_facts,
@@ -103,12 +153,55 @@ async def chat_node(state: AgentState) -> dict:
     )
 
     response = await llm.ainvoke(all_messages)
-    print(f"LLM responded: {response.content[:80]}...")
+    print(f"💬 chat_agent responded: {response.content[:80]}...")
+    return {"messages": [response]}
+
+
+# NODE 4 [ Research Agent Node ]
+async def research_agent_node(state: AgentState) -> dict:
+    """
+    Research agent — handles web search and information synthesis.
+    Has web_search_tool bound to it.
+    Uses multi-step reasoning: search → observe results → respond.
+    """
+    all_messages = (
+        [SystemMessage(content=RESEARCH_AGENT_PROMPT)]
+        + state.messages
+    )
+
+    response = await llm_research.ainvoke(all_messages)
+
+    # If the LLM wants to call a tool, tool_calls will be populated
+    if response.tool_calls:
+        print(f"research_agent calling tool: {response.tool_calls[0]['name']}")
+    else:
+        print(f"research_agent responded: {response.content[:80]}...")
 
     return {"messages": [response]}
 
 
-# NODE 3 — memory_writer_node
+# NODE 5 [ Tool Agent Node ]
+async def tool_agent_node(state: AgentState) -> dict:
+    """
+    Tool agent — handles calculations, weather, and API lookups.
+    Has calculator_tool and weather_tool bound to it.
+    """
+    all_messages = (
+        [SystemMessage(content=TOOL_AGENT_PROMPT)]
+        + state.messages
+    )
+
+    response = await llm_tool.ainvoke(all_messages)
+
+    if response.tool_calls:
+        print(f"tool_agent calling tool: {response.tool_calls[0]['name']}")
+    else:
+        print(f"tool_agent responded: {response.content[:80]}...")
+
+    return {"messages": [response]}
+
+
+# NODE 6 [ Memory Writer Node ]
 async def memory_writer_node(state: AgentState) -> dict:
     """
     Saves messages, extracts facts, summarizes if needed.
@@ -183,22 +276,84 @@ async def memory_writer_node(state: AgentState) -> dict:
     return {}
 
 
+# ROUTING FUNCTION
+def route_to_agent(state: AgentState) -> str:
+    """
+    This function is used as the conditional edge after supervisor_node.
+    LangGraph calls this function and uses the return value to decide
+    which node to execute next.
+
+    It simply reads next_agent from state and returns it.
+    LangGraph maps the return value to the actual node name.
+    """
+    return state.next_agent
+
+
 # GRAPH
 def build_graph(checkpointer):
     """
-    START → memory_retrieval → chat_node → memory_writer → END
-    Streaming events come from chat_node only.
-    memory_retrieval and memory_writer emit no stream events.
+    START → memory_retrieval → supervisor
+    supervisor → chat_agent | research_agent | tool_agent  (conditional)
+    all agents → tool_node (if tool call needed) → back to agent
+    all agents → memory_writer → END
     """
     graph = StateGraph(AgentState)
 
-    graph.add_node("memory_retrieval", memory_retrieval_node)
-    graph.add_node("chat_node",        chat_node)
-    graph.add_node("memory_writer",    memory_writer_node)
+    research_tool_node = ToolNode(RESEARCH_TOOLS)
+    tool_agent_tool_node = ToolNode(TOOL_AGENT_TOOLS)
 
+    graph.add_node("memory_retrieval",    memory_retrieval_node)
+    graph.add_node("supervisor",          supervisor_node)
+    graph.add_node("chat_agent",          chat_agent_node)
+    graph.add_node("research_agent",      research_agent_node)
+    graph.add_node("research_tools",      research_tool_node)
+    graph.add_node("tool_agent",          tool_agent_node)
+    graph.add_node("tool_agent_tools",    tool_agent_tool_node)
+    graph.add_node("memory_writer",       memory_writer_node)
+
+# Fixed edges
     graph.add_edge(START,              "memory_retrieval")
-    graph.add_edge("memory_retrieval", "chat_node")
-    graph.add_edge("chat_node",        "memory_writer")
-    graph.add_edge("memory_writer",    END)
+    graph.add_edge("memory_retrieval", "supervisor")
+
+# Conditional edge from supervisor
+    graph.add_conditional_edges(
+        "supervisor",
+        route_to_agent,
+        {
+            "chat_agent":     "chat_agent",
+            "research_agent": "research_agent",
+            "tool_agent":     "tool_agent",
+        }
+    )
+# Tool loop for research_agent
+    graph.add_conditional_edges(
+        "research_agent",
+        lambda state: "research_tools"
+            if state.messages[-1].tool_calls
+            else "memory_writer",
+        {
+            "research_tools": "research_tools",
+            "memory_writer":  "memory_writer",
+        }
+    )
+
+    graph.add_edge("research_tools", "research_agent")
+
+# Tool loop for tool_agent
+    graph.add_conditional_edges(
+        "tool_agent",
+        lambda state: "tool_agent_tools"
+            if state.messages[-1].tool_calls
+            else "memory_writer",
+        {
+            "tool_agent_tools": "tool_agent_tools",
+            "memory_writer":    "memory_writer",
+        }
+    )
+
+    graph.add_edge("tool_agent_tools", "tool_agent")
+
+    graph.add_edge("chat_agent",   "memory_writer")
+    graph.add_edge("memory_writer", END)
 
     return graph.compile(checkpointer=checkpointer)

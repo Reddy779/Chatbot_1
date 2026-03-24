@@ -7,6 +7,8 @@ python-dotenv
 sqlalchemy[asyncio]
 asyncpg
 alembic
+psycopg2-binary
+psycopg[binary]
 
 # Validation
 pydantic
@@ -16,13 +18,15 @@ pydantic-settings
 groq
 langchain-core
 langchain-groq
+langchain-community
 
 # LangGraph
 langgraph
 langgraph-checkpoint-postgres
 
-# HTTP client
+# HTTP client / tools
 httpx
-psycopg2-binary
-
-# psycopg2-binary==2.9.9
+requests
+duckduckgo-search
+numexpr
+ddgs
