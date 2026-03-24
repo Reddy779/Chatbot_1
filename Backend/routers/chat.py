@@ -1,39 +1,62 @@
-from fastapi import APIRouter, HTTPException, Request
+import json
+import traceback
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 
-from models.schemas import ChatRequest, ChatResponse
-from services.graph import llm
+from models.schemas import ChatRequest
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, req: Request):
 
-    graph = req.app.extra.get("graph") or req.app.state.__dict__.get("graph")
+@router.post("/chat")
+async def chat(request: ChatRequest):
 
     from main import app_state
+
     graph = app_state["graph"]
 
     config = {"configurable": {"thread_id": request.session_id}}
 
     initial_state = {
-        "messages":   [HumanMessage(content=request.message)],
-        "user_id":    request.user_id,
-        "session_id": request.session_id,
-        "user_facts": [],
-        "summaries":  [],
+        "messages":      [HumanMessage(content=request.message)],
+        "user_id":       request.user_id,
+        "session_id":    request.session_id,
+        "user_facts":    [],
+        "summaries":     [],
+        "history":       [],
+        "message_count": 0,
     }
 
-    try:
-        result = await graph.ainvoke(initial_state, config=config)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Graph error: {str(e)}")
+    async def event_stream():
+        try:
+            async for event in graph.astream_events(
+                initial_state,
+                config=config,
+                version="v2",
+            ):
+                event_type = event.get("event", "")
 
-    reply = result["messages"][-1].content
+                if event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
 
-    return ChatResponse(
-        session_id=request.session_id,
-        user_id=request.user_id,
-        reply=reply,
-        model=llm.model_name,
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        payload = json.dumps({"chunk": chunk.content})
+                        yield f"data: {payload}\n\n"
+
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+        except Exception as e:
+            traceback.print_exc()
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":        "keep-alive",
+        },
     )

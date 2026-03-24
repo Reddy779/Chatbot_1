@@ -32,6 +32,7 @@ llm = ChatGroq(
     model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
     temperature=0.7,
     max_tokens=1024,
+    streaming=True
 )
 
 llm_small = ChatGroq(
@@ -45,9 +46,8 @@ llm_small = ChatGroq(
 # NODE 1 — memory_retrieval_node
 async def memory_retrieval_node(state: AgentState) -> dict:
     """
-    Runs first on every request.
-    Fetches all memory layers sequentially — asyncio.gather causes
-    conflicts when multiple queries share the same session.
+    Fetches all memory layers from Neon before the LLM call.
+    Does NOT stream anything — purely a DB read node.
     """
     from main import db_session_factory
 
@@ -79,8 +79,10 @@ async def memory_retrieval_node(state: AgentState) -> dict:
 # NODE 2 — chat_node
 async def chat_node(state: AgentState) -> dict:
     """
-    Builds rich system prompt from memory and calls the LLM.
-    No DB access here — only LLM call.
+    Builds rich system prompt and calls the LLM.
+    With streaming=True on llm, this node emits token-level events
+    that astream_events() in the router can intercept and forward.
+    The node itself doesn't change — streaming is handled upstream.
     """
     system_prompt = build_system_prompt(
         user_facts=state.user_facts,
@@ -109,8 +111,9 @@ async def chat_node(state: AgentState) -> dict:
 # NODE 3 — memory_writer_node
 async def memory_writer_node(state: AgentState) -> dict:
     """
-    Runs last on every request.
-    Opens its own fresh DB session, does all writes, closes cleanly.
+    Saves messages, extracts facts, summarizes if needed.
+    Does NOT stream anything — purely a DB write node.
+    Runs after chat_node finishes, so the full reply is available.
     """
     from main import db_session_factory
 
@@ -173,7 +176,7 @@ async def memory_writer_node(state: AgentState) -> dict:
 
     except Exception as e:
         traceback.print_exc()
-        print(f" Memory writer error: {e}")
+        print(f"Memory writer error: {e}")
     finally:
         await db.close()   
 
@@ -182,6 +185,11 @@ async def memory_writer_node(state: AgentState) -> dict:
 
 # GRAPH
 def build_graph(checkpointer):
+    """
+    START → memory_retrieval → chat_node → memory_writer → END
+    Streaming events come from chat_node only.
+    memory_retrieval and memory_writer emit no stream events.
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("memory_retrieval", memory_retrieval_node)
