@@ -10,9 +10,15 @@ from services.graph import build_graph
 
 load_dotenv()
 
-# ── Async DB session factory ──────────────────────────────────────────
+def clean_url(url: str) -> str:
+    url = url.replace("?sslmode=require", "")
+    url = url.replace("&sslmode=require", "")
+    url = url.replace("?ssl=require", "")
+    url = url.replace("&ssl=require", "")
+    return url
+
 engine = create_async_engine(
-    os.getenv("DATABASE_URL"),
+    clean_url(os.getenv("DATABASE_URL", "")),
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
@@ -29,46 +35,59 @@ db_session_factory = sessionmaker(
 
 app_state = {}
 
-def clean_checkpoint_url() -> str:
-    """
-    AsyncPostgresSaver uses asyncpg internally.
-    asyncpg does NOT accept sslmode=require in the URL.
-    We strip all SSL params from the URL — Neon works without
-    them being explicitly set in the connection string.
-    """
-    url = os.getenv("CHECKPOINT_DB_URL", "")
-    url = url.replace("?sslmode=require", "")
-    url = url.replace("&sslmode=require", "")
-    url = url.replace("?ssl=require", "")
-    url = url.replace("&ssl=require", "")
-    return url
+# def clean_checkpoint_url() -> str:
+#     """
+#     AsyncPostgresSaver uses asyncpg internally.
+#     asyncpg does NOT accept sslmode=require in the URL.
+#     We strip all SSL params from the URL — Neon works without
+#     them being explicitly set in the connection string.
+#     """
+#     url = os.getenv("CHECKPOINT_DB_URL", "")
+#     url = url.replace("?sslmode=require", "")
+#     url = url.replace("&sslmode=require", "")
+#     url = url.replace("?ssl=require", "")
+#     url = url.replace("&ssl=require", "")
+#     return url
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    checkpoint_url = clean_checkpoint_url()
-    print(f"🔗 Connecting checkpointer to: {checkpoint_url[:50]}...")
+    checkpoint_url = clean_url(os.getenv("CHECKPOINT_DB_URL", ""))
+    print(f"Connecting checkpointer to: {checkpoint_url[:55]}...")
 
     async with AsyncPostgresSaver.from_conn_string(
         checkpoint_url
     ) as checkpointer:
         await checkpointer.setup()
         app_state["graph"] = build_graph(checkpointer)
-        print("✅ Graph ready, connected to Neon DB")
+        print("Graph ready, connected to Neon DB")
         yield
+
     await engine.dispose()
 
-app = FastAPI(title="DR Chatbot", version="1.0.2", lifespan=lifespan)
+app = FastAPI(
+    title="DR Chatbot API",
+    description="Chatbot with multi-agent LangGraph + long-term memory"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
-from routers.chat import router
-app.include_router(router)
+from routers.chat     import router as chat_router
+from routers.sessions import router as sessions_router
+from routers.memory   import router as memory_router
+
+app.include_router(chat_router)
+app.include_router(sessions_router)
+app.include_router(memory_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "3", "db": "neon"}
+    return {
+        "status": "ok",
+        "db":     "neon",
+        "agents": ["chat_agent", "research_agent", "tool_agent"]
+    }

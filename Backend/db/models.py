@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from db.database import Base
 
 def utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class User(Base):
@@ -23,6 +23,8 @@ class Session(Base):
 
     id         = Column(String,   primary_key=True)  # = LangGraph thread_id
     user_id    = Column(String,   ForeignKey("users.id"), nullable=False, index=True)
+    title       = Column(String,   nullable=True)           
+    last_active = Column(DateTime, nullable=True) 
     created_at = Column(DateTime, default=utcnow)
 
     user       = relationship("User",    back_populates="sessions")
