@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from services.graph import build_graph
 
-load_dotenv()
+load_dotenv()  
 
 def clean_url(url: str) -> str:
     url = url.replace("?sslmode=require", "")
@@ -17,8 +17,13 @@ def clean_url(url: str) -> str:
     url = url.replace("&ssl=require", "")
     return url
 
+
+raw_db_url   = os.getenv("DATABASE_URL", "NOT FOUND")
+clean_db_url = clean_url(raw_db_url)
+print(f"DATABASE_URL host: {clean_db_url[20:70]}")
+
 engine = create_async_engine(
-    clean_url(os.getenv("DATABASE_URL", "")),
+    clean_db_url,
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
@@ -35,31 +40,17 @@ db_session_factory = sessionmaker(
 
 app_state = {}
 
-# def clean_checkpoint_url() -> str:
-#     """
-#     AsyncPostgresSaver uses asyncpg internally.
-#     asyncpg does NOT accept sslmode=require in the URL.
-#     We strip all SSL params from the URL — Neon works without
-#     them being explicitly set in the connection string.
-#     """
-#     url = os.getenv("CHECKPOINT_DB_URL", "")
-#     url = url.replace("?sslmode=require", "")
-#     url = url.replace("&sslmode=require", "")
-#     url = url.replace("?ssl=require", "")
-#     url = url.replace("&ssl=require", "")
-#     return url
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     checkpoint_url = clean_url(os.getenv("CHECKPOINT_DB_URL", ""))
-    print(f"Connecting checkpointer to: {checkpoint_url[:55]}...")
+    print(f"CHECKPOINT_URL host: {checkpoint_url[13:70]}")
 
     async with AsyncPostgresSaver.from_conn_string(
         checkpoint_url
     ) as checkpointer:
         await checkpointer.setup()
         app_state["graph"] = build_graph(checkpointer)
-        print("Graph ready, connected to Neon DB")
+        print("✅ Graph ready, connected to Neon DB")
         yield
 
     await engine.dispose()
